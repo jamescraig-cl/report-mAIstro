@@ -1,7 +1,7 @@
 {
     "dockerfile_lines": [],
     "graphs": {
-      "report_masitro": "./report_masitro.py:graph"
+      "report_agent": "./agent/report_agent.py:graph"
     },
     "python_version": "3.11",
     "env": "./.env",
