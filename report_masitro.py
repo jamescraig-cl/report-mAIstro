@@ -21,8 +21,8 @@ import configuration
 # ------------------------------------------------------------
 # LLMs 
 
-gpt_4o = ChatOpenAI(model="gpt-4o", temperature=0) 
-claude_3_5_sonnet = ChatAnthropic(model="claude-3-5-sonnet-20240620", temperature=0) 
+gpt_4o = ChatOpenAI(model="gpt-4o", temperature=0)
+# ChatAnthropic(model="claude-3-5-sonnet-20240620", temperature=0))
 
 # ------------------------------------------------------------
 # Search
@@ -58,6 +58,15 @@ class SearchQuery(BaseModel):
 class Queries(BaseModel):
     queries: List[SearchQuery] = Field(
         description="List of search queries.",
+    )
+
+class FinalSection(BaseModel):
+    title: str = Field(description="The title of the section")
+    content: str = Field(description="the content of the section")
+
+class FinalSections(BaseModel):
+    finalSections: List[FinalSection] = Field(
+        description="Final output sections of the report"
     )
 
 class ReportStateInput(TypedDict):
@@ -116,8 +125,8 @@ def deduplicate_and_format_sources(search_response, max_tokens_per_source, inclu
     # Deduplicate by URL
     unique_sources = {}
     for source in sources_list:
-        if source['url'] not in unique_sources:
-            unique_sources[source['url']] = source
+    #     if source['url'] not in unique_sources:
+        unique_sources[source['url']] = source
     
     # Format output
     formatted_text = "Sources:\n\n"
@@ -174,8 +183,9 @@ def tavily_search(query):
                 - raw_content (str): Full content of the page if available"""
      
     return tavily_client.search(query, 
-                         max_results=5, 
-                         include_raw_content=True)
+                         max_results=7,
+                         include_raw_content=True
+                         , search_depth="advanced")
 
 @traceable
 async def tavily_search_async(search_queries, tavily_topic, tavily_days):
@@ -201,19 +211,21 @@ async def tavily_search_async(search_queries, tavily_topic, tavily_days):
             search_tasks.append(
                 tavily_async_client.search(
                     query,
-                    max_results=5,
+                    max_results=7,
                     include_raw_content=True,
                     topic="news",
-                    days=tavily_days
+                    days=tavily_days,
+                    search_depth="advanced"
                 )
             )
         else:
             search_tasks.append(
                 tavily_async_client.search(
                     query,
-                    max_results=5,
+                    max_results=7,
                     include_raw_content=True,
-                    topic="general"
+                    topic="general",
+                    search_depth="advanced"
                 )
             )
 
@@ -410,7 +422,7 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
         report_structure = str(report_structure)
 
     # Generate search query
-    structured_llm = claude_3_5_sonnet.with_structured_output(Queries)
+    structured_llm = gpt_4o.with_structured_output(Queries)
 
     # Format system instructions
     system_instructions_query = report_planner_query_writer_instructions.format(topic=topic, report_organization=report_structure, number_of_queries=number_of_queries)
@@ -431,7 +443,7 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
     system_instructions_sections = report_planner_instructions.format(topic=topic, report_organization=report_structure, context=source_str)
 
     # Generate sections 
-    structured_llm = claude_3_5_sonnet.with_structured_output(Sections)
+    structured_llm = gpt_4o.with_structured_output(Sections)
     report_sections = structured_llm.invoke([SystemMessage(content=system_instructions_sections)]+[HumanMessage(content="Generate the sections of the report. Your response must include a 'sections' field containing a list of sections. Each section must have: name, description, plan, research, and content fields.")])
 
     return {"sections": report_sections.sections}
@@ -488,7 +500,7 @@ def write_section(state: SectionState):
     system_instructions = section_writer_instructions.format(section_title=section.name, section_topic=section.description, context=source_str)
 
     # Generate section  
-    section_content = claude_3_5_sonnet.invoke([SystemMessage(content=system_instructions)]+[HumanMessage(content="Generate a report section based on the provided sources.")])
+    section_content = gpt_4o.invoke([SystemMessage(content=system_instructions)]+[HumanMessage(content="Generate a report section based on the provided sources.")])
     
     # Write content to the section object  
     section.content = section_content.content
@@ -526,9 +538,8 @@ def write_final_sections(state: SectionState):
     
     # Format system instructions
     system_instructions = final_section_writer_instructions.format(section_title=section.name, section_topic=section.description, context=completed_report_sections)
-
-    # Generate section  
-    section_content = claude_3_5_sonnet.invoke([SystemMessage(content=system_instructions)]+[HumanMessage(content="Generate a report section based on the provided sources.")])
+    # Generate section
+    section_content = gpt_4o.invoke([SystemMessage(content=system_instructions)]+[HumanMessage(content="Generate a report section based on the provided sources.")])
     
     # Write content to section 
     section.content = section_content.content
