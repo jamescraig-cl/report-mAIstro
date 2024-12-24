@@ -7,7 +7,7 @@ import agent.configuration as configuration
 from agent.utils import *
 
 
-gpt_4o = ChatOpenAI(model="gpt-4o", temperature=0)
+# gpt_4o = ChatOpenAI(model="gpt-4o", temperature=0)
 
 
 # ------------------------------------------------------------
@@ -22,6 +22,10 @@ def generate_queries(state: SectionState, config: RunnableConfig):
     # Get configuration
     configurable = configuration.Configuration.from_runnable_config(config)
     number_of_queries = configurable.number_of_queries
+
+    #llm
+    llm_model = configurable.llm_selector
+    gpt_4o = ChatOpenAI(model=llm_model, temperature=0)
 
     # Generate queries
     structured_llm = gpt_4o.with_structured_output(Queries)
@@ -42,6 +46,8 @@ async def search_web(state: SectionState, config: RunnableConfig):
 
     # Get state
     search_queries = state["search_queries"]
+    include_domains = state["include_domains"]
+    exclude_domains = state["exclude_domains"]
 
     # Get configuration
     configurable = configuration.Configuration.from_runnable_config(config)
@@ -50,7 +56,7 @@ async def search_web(state: SectionState, config: RunnableConfig):
 
     # Web search
     query_list = [query.search_query for query in search_queries]
-    search_docs = await tavily_search_async(query_list, tavily_topic, tavily_days)
+    search_docs = await tavily_search_async(query_list, tavily_topic, tavily_days, exclude_domains=exclude_domains, include_domains=include_domains)
 
     # Deduplicate and format sources
     source_str = deduplicate_and_format_sources(search_docs, max_tokens_per_source=5000, include_raw_content=True)
@@ -58,8 +64,10 @@ async def search_web(state: SectionState, config: RunnableConfig):
     return {"source_str": source_str}
 
 
-def write_section(state: SectionState):
+def write_section(state: SectionState, config: RunnableConfig):
     """ Write a section of the report """
+
+    configurable = configuration.Configuration.from_runnable_config(config)
 
     # Get state
     section = state["section"]
@@ -68,6 +76,9 @@ def write_section(state: SectionState):
     # Format system instructions
     system_instructions = section_writer_instructions.format(section_title=section.name,
                                                              section_topic=section.description, context=source_str)
+    # llm
+    llm_model = configurable.llm_selector
+    gpt_4o = ChatOpenAI(model=llm_model, temperature=0)
 
     # Generate section
     section_content = gpt_4o.invoke([SystemMessage(content=system_instructions)] + [

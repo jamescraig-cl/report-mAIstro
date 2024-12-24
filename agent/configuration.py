@@ -27,6 +27,11 @@ class Configuration:
     tavily_topic: str = "general"
     tavily_days: str = None
 
+    llm_selector: str = "gpt-4o-mini"
+
+    rag_k: int = 8
+    rag_embedder: str = "text-embedding-3-large"
+
     @classmethod
     def from_runnable_config(
         cls, config: Optional[RunnableConfig] = None

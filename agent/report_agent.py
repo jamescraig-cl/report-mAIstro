@@ -6,7 +6,7 @@ from agent.build_section_with_web_research import *
 # ------------------------------------------------------------
 # LLMs 
 
-gpt_4o = ChatOpenAI(model="gpt-4o", temperature=0)
+# gpt_4o = ChatOpenAI(model="gpt-4o", temperature=0)
 
 # ------------------------------------------------------------
 # Search
@@ -22,6 +22,7 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
 
     # Inputs
     topic = state["topic"]
+    suggested_urls_dict = state.get("suggested_urls_dict", {})
 
     # Get configuration
     configurable = configuration.Configuration.from_runnable_config(config)
@@ -33,6 +34,10 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
     # Convert JSON object to string if necessary
     if isinstance(report_structure, dict):
         report_structure = str(report_structure)
+
+    # llm
+    llm_model = configurable.llm_selector
+    gpt_4o = ChatOpenAI(model=llm_model, temperature=0)
 
     # Generate search query
     structured_llm = gpt_4o.with_structured_output(Queries)
@@ -59,6 +64,15 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
     structured_llm = gpt_4o.with_structured_output(Sections)
     report_sections = structured_llm.invoke([SystemMessage(content=system_instructions_sections)]+[HumanMessage(content="Generate the sections of the report. Your response must include a 'sections' field containing a list of sections. Each section must have: name, description, plan, research, and content fields.")])
 
+    for section in report_sections.sections:
+        #reset value from any llm data
+        section.suggested_urls = []
+        #check if section name is contained in any suggested sections (account for variation in LLM section titles)
+        for suggested_section in suggested_urls_dict.keys():
+            if section.name.lower() in suggested_section:
+                #set suggested list
+                section.suggested_urls = suggested_urls_dict[suggested_section]
+
     return {"sections": report_sections.sections}
 
 def initiate_section_writing(state: ReportState):
@@ -66,7 +80,7 @@ def initiate_section_writing(state: ReportState):
         
     # Kick off section writing in parallel via Send() API for any sections that require research
     return [
-        Send("build_section_with_web_research", {"section": s}) 
+        Send("build_section_with_web_research", {"section": s, "exclude_domains": state.get("exclude_domains", None), "include_domains": state.get("include_domains", None)})
         for s in state["sections"] 
         if s.research
     ]
@@ -96,12 +110,19 @@ def initiate_final_section_writing(state: ReportState):
     ]
 
 #intro, conclusion, and other non-research sections
-def write_final_sections(state: SectionState):
+def write_final_sections(state: SectionState, config: RunnableConfig):
     """ Write final sections of the report, which do not require web search and use the completed sections as context """
 
     # Get state
     section = state["section"]
     completed_report_sections = state["report_sections_from_research"]
+
+    # Get configuration
+    configurable = configuration.Configuration.from_runnable_config(config)
+
+    # llm
+    llm_model = configurable.llm_selector
+    gpt_4o = ChatOpenAI(model=llm_model, temperature=0)
 
     # Format system instructions
     system_instructions = final_section_writer_instructions.format(section_title=section.name,
@@ -117,12 +138,26 @@ def write_final_sections(state: SectionState):
     # Write the updated section to completed sections
     return {"completed_sections": [section]}
 
-def compile_final_report(state: ReportState):
+def compile_final_report(state: ReportState, config: RunnableConfig):
     """ Compile the final report """    
 
     # Get sections
     sections = state["sections"]
     completed_sections = {s.name: s.content for s in state["completed_sections"]}
+
+    # Get configuration
+    configurable = configuration.Configuration.from_runnable_config(config)
+
+    # llm
+    llm_model = configurable.llm_selector
+    gpt_4o = ChatOpenAI(model=llm_model, temperature=0)
+
+    #att: take completed sections and conform to pydantic model
+    structured_llm = gpt_4o.with_structured_output(FinalSections)
+    system_instructions_json = report_compiler_json_instructions.format(context=completed_sections)
+    structured_prompt = [SystemMessage(content=system_instructions_json)]+[HumanMessage(content="Return a JSON representation of the report, placing each report section into an appropriate JSON object. Using the report as context, categorize the company as a manufacturer, service provide, distributor, or other high-level company type. ")]
+    #type: FinalSections
+    structured_result = structured_llm.invoke(structured_prompt)
 
     # Update sections with completed content while maintaining original order
     for section in sections:
@@ -131,12 +166,18 @@ def compile_final_report(state: ReportState):
     # Compile final report
     all_sections = "\n\n".join([s.content for s in sections])
 
-    return {"final_report": all_sections, "final_report_dict": completed_sections}
+    return {"final_report": all_sections, "final_report_dict": structured_result}
+
+
+
 
 #research sub-graph
 # Add nodes and edges
 section_builder = StateGraph(SectionState, output=SectionOutputState)
 section_builder.add_node("generate_queries", generate_queries)
+# opt 1 RAG
+# section_builder.add_node("retrieve", retrieve)
+# opt 2 web
 section_builder.add_node("search_web", search_web)
 section_builder.add_node("write_section", write_section)
 

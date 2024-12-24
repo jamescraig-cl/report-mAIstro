@@ -6,6 +6,7 @@ from typing import  Annotated, List
 from pydantic import BaseModel, Field
 from langsmith import traceable
 
+from enum import Enum
 from tavily import TavilyClient, AsyncTavilyClient
 
 # ------------------------------------------------------------
@@ -30,6 +31,11 @@ class Section(BaseModel):
     content: str = Field(
         description="The content of the section."
     )
+    suggested_urls: list[str] = Field(
+        description="List of user-supplied URLs to use for web research"
+    )
+
+
 
 class Sections(BaseModel):
     sections: List[Section] = Field(
@@ -43,21 +49,49 @@ class Queries(BaseModel):
     queries: List[SearchQuery] = Field(
         description="List of search queries.",
     )
+class SectionEnum(str, Enum):
+    products = 'products'
+    services = 'services'
+    leaders = 'leaders'
+    description = 'description'
+    headquarters = 'headquarters'
+    markets = 'markets'
+    line_of_business = 'line_of_business'
+    locations = 'locations'
+    distributors = 'distributors'
+    introduction = 'introduction'
+    conclusion = 'conclusion'
+
+class CategoryEnum(str, Enum):
+    manufacturer = 'manufacturer'
+    contract_manufacturer = 'contract manufacturer'
+    services = 'services'
+    distributor = 'distributor'
+    software = 'software'
+    media = 'media'
 
 class FinalSection(BaseModel):
-    name: str = Field(description="The name of the section")
+    # name: str = Field(description="The name of the section")
+    name: SectionEnum
     content: str = Field(description="the content of the section")
 
 class FinalSections(BaseModel):
+    category: CategoryEnum
     finalSections: List[FinalSection] = Field(
         description="Final output sections of the report"
     )
+
+
+
 
 # ------------------------------------------------------------
 # State
 
 class ReportStateInput(TypedDict):
     topic: str # Report topic
+    suggested_urls_dict: dict
+    include_domains: list[str]
+    exclude_domains: list[str]
 
 class ReportStateOutput(TypedDict):
     final_report: str # Final report
@@ -70,6 +104,10 @@ class ReportState(TypedDict):
     completed_sections: Annotated[list, operator.add] # Send() API key
     report_sections_from_research: str # String of any completed sections from research to write final sections
     final_report: str # Final report
+    suggested_urls_dict: dict
+    include_domains: list[str]
+    exclude_domains: list[str]
+
 
 class SectionState(TypedDict):
     section: Section # Report section
@@ -77,6 +115,9 @@ class SectionState(TypedDict):
     source_str: str # String of formatted source content from web search
     report_sections_from_research: str # String of any completed sections from research to write final sections
     completed_sections: list[Section] # Final key we duplicate in outer state for Send() API
+    suggested_urls: list[str]
+    include_domains: list[str]
+    exclude_domains: list[str]
 
 class SectionOutputState(TypedDict):
     completed_sections: list[Section] # Final key we duplicate in outer state for Send() API
@@ -164,7 +205,8 @@ Guidelines for writing:
 - Use technical terminology precisely
 
 2. Length and Style:
-- Strict 150-200 word limit
+- Strict 150-200 word limit for paragraph-centered sections
+- List- based sections should be very concise but contain as many list items as are found in the context
 - No marketing language
 - Technical focus
 - Write in simple, clear language
@@ -194,12 +236,15 @@ Guidelines for writing:
 {context}
 
 5. Quality Checks:
-- Exactly 150-200 words (excluding title and sources)
+
 - Careful use of only ONE structural element (table or list) and only if it helps clarify your point
 - One specific example / case study
 - Starts with bold insight
 - No preamble prior to creating the section content
 - Sources cited at end"""
+
+# dropped quality checks
+# - Exactly 150-200 words (excluding title and sources)
 
 final_section_writer_instructions="""You are an expert technical writer crafting a section that synthesizes information from the rest of the report.
 
@@ -248,6 +293,11 @@ For Conclusion/Summary:
 - Markdown format
 - Do not include word count or any preamble in your response"""
 
+report_compiler_json_instructions = """
+Translate the following report into JSON, placing each section in the appropriate JSON object
+
+{context}
+"""
 # ------------------------------------------------------------
 # Utility functions
 
@@ -347,7 +397,7 @@ def tavily_search(query):
 
 
 @traceable
-async def tavily_search_async(search_queries, tavily_topic, tavily_days):
+async def tavily_search_async(search_queries, tavily_topic, tavily_days, **kwargs):
     """
     Performs concurrent web searches using the Tavily API.
 
@@ -365,6 +415,15 @@ async def tavily_search_async(search_queries, tavily_topic, tavily_days):
     """
 
     search_tasks = []
+
+    exclude_domains = kwargs.get('exclude_domains', None)
+    if exclude_domains:
+        print('exclude ' + str(exclude_domains))
+
+    include_domains = kwargs.get('include_domains', None)
+    if include_domains:
+        print('include ' + str(include_domains))
+
     for query in search_queries:
         if tavily_topic == "news":
             search_tasks.append(
@@ -374,7 +433,7 @@ async def tavily_search_async(search_queries, tavily_topic, tavily_days):
                     include_raw_content=True,
                     topic="news",
                     days=tavily_days,
-                    search_depth="advanced"
+                    search_depth="advanced",
                 )
             )
         else:
@@ -384,7 +443,9 @@ async def tavily_search_async(search_queries, tavily_topic, tavily_days):
                     max_results=7,
                     include_raw_content=True,
                     topic="general",
-                    search_depth="advanced"
+                    search_depth="advanced",
+                    exclude_domains=exclude_domains,
+                    include_domains=include_domains
                 )
             )
 
