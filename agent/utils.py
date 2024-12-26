@@ -1,10 +1,17 @@
 
 import asyncio
 import operator
+
+from langchain_core.tools import create_retriever_tool
+from langchain_openai import OpenAIEmbeddings
+from langchain_pinecone import PineconeVectorStore
 from typing_extensions import TypedDict
 from typing import  Annotated, List
 from pydantic import BaseModel, Field
 from langsmith import traceable
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders.firecrawl import FireCrawlLoader
 
 from enum import Enum
 from tavily import TavilyClient, AsyncTavilyClient
@@ -90,8 +97,10 @@ class FinalSections(BaseModel):
 class ReportStateInput(TypedDict):
     topic: str # Report topic
     suggested_urls_dict: dict
+    scrape_indicator: bool
     include_domains: list[str]
     exclude_domains: list[str]
+    report_specification: dict
 
 class ReportStateOutput(TypedDict):
     final_report: str # Final report
@@ -105,8 +114,11 @@ class ReportState(TypedDict):
     report_sections_from_research: str # String of any completed sections from research to write final sections
     final_report: str # Final report
     suggested_urls_dict: dict
+    scrape_indicator: bool
+    rag_namespace: str
     include_domains: list[str]
     exclude_domains: list[str]
+    report_specification: dict
 
 
 class SectionState(TypedDict):
@@ -116,6 +128,7 @@ class SectionState(TypedDict):
     report_sections_from_research: str # String of any completed sections from research to write final sections
     completed_sections: list[Section] # Final key we duplicate in outer state for Send() API
     suggested_urls: list[str]
+    rag_namespace: str
     include_domains: list[str]
     exclude_domains: list[str]
 
@@ -453,3 +466,47 @@ async def tavily_search_async(search_queries, tavily_topic, tavily_days, **kwarg
     search_docs = await asyncio.gather(*search_tasks)
 
     return search_docs
+
+@traceable
+async def scrape_async(url):
+
+    loader = FireCrawlLoader(
+        url=url,
+        mode="scrape",
+    )
+    documents = loader.load()
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1024,
+        chunk_overlap=128,
+        length_function=len,
+        is_separator_regex=False,
+    )
+    filtered_documents = filter(lambda raw_document: "error" not in raw_document.metadata.keys(), documents)
+
+    docs = text_splitter.split_documents(filtered_documents)
+
+    for document in docs:
+        header_string = "Title: " + document.metadata.get("title", '') + " Description: " + document.metadata.get(
+            "description", '')
+        document.page_content = header_string + ' ' + document.page_content
+
+    return docs
+
+
+def create_retriever(namespace, index_name):
+
+    embedding_model = "text-embedding-3-large"
+    embeddings = OpenAIEmbeddings(model=embedding_model)
+
+    #prepare retriever tool and select by namespace
+    vectorsearch = PineconeVectorStore(index_name=index_name, embedding=embeddings, namespace=namespace)
+    print("   ---RETRIEVER FOR '" + namespace + "'---")
+
+    retriever = vectorsearch.as_retriever(search_kwargs={"k": 2, "namespace": namespace})
+
+    retriever_tool = create_retriever_tool(
+        retriever,
+        "search_company_website",
+        "Searches and returns content from within the company website.",
+    )
+    return retriever

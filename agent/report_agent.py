@@ -1,12 +1,10 @@
 from langgraph.constants import Send
 from langgraph.graph import START, END, StateGraph
 
+from langchain_pinecone import PineconeVectorStore
+from langchain_openai import OpenAIEmbeddings
+
 from agent.build_section_with_web_research import *
-
-# ------------------------------------------------------------
-# LLMs 
-
-# gpt_4o = ChatOpenAI(model="gpt-4o", temperature=0)
 
 # ------------------------------------------------------------
 # Search
@@ -18,69 +16,45 @@ tavily_async_client = AsyncTavilyClient()
 # Core graph nodes
 # part 1
 async def generate_report_plan(state: ReportState, config: RunnableConfig):
-    """ Generate the report plan """
+    """ Skip generation and pass section JSON as Pydantic Sections to next nodes """
 
-    # Inputs
-    topic = state["topic"]
-    suggested_urls_dict = state.get("suggested_urls_dict", {})
-
+    report_sections = state["report_specification"].get("sections")
+    namespace = state["report_specification"].get("company").replace(" ", "")
+    print('set namespace ' + namespace)
     # Get configuration
     configurable = configuration.Configuration.from_runnable_config(config)
-    report_structure = configurable.report_structure
-    number_of_queries = configurable.number_of_queries
-    tavily_topic = configurable.tavily_topic
-    tavily_days = configurable.tavily_days
 
-    # Convert JSON object to string if necessary
-    if isinstance(report_structure, dict):
-        report_structure = str(report_structure)
+    pc_index = configurable.pc_index
 
-    # llm
-    llm_model = configurable.llm_selector
-    gpt_4o = ChatOpenAI(model=llm_model, temperature=0)
+    #Serialize as Pydantic Section
+    pydantic_sections = [Section(**section) for section in report_sections]
 
-    # Generate search query
-    structured_llm = gpt_4o.with_structured_output(Queries)
+    if state.get("scrape_indicator", ""):
+        #collect list of urls to scrape
+        scrape_urls = [s.get("suggested_urls", []) for s in report_sections]
+        flat_scrape_urls = [url for section_list in scrape_urls for url in section_list]
 
-    # Format system instructions
-    system_instructions_query = report_planner_query_writer_instructions.format(topic=topic, report_organization=report_structure, number_of_queries=number_of_queries)
+        embedding_model = "text-embedding-3-large"
+        embeddings = OpenAIEmbeddings(model=embedding_model)
+        for url in flat_scrape_urls:
+            #scrape each url and return formatted/cleaned chunks
+            docs = await scrape_async(url)
+            #upsert to Pinecone
+            PineconeVectorStore.from_documents(
+                docs,
+                index_name=pc_index,
+                embedding=embeddings,
+                namespace=namespace
+            )
 
-    # Generate queries  
-    results = structured_llm.invoke([SystemMessage(content=system_instructions_query)]+[HumanMessage(content="Generate search queries that will help with planning the sections of the report.")])
-
-    # Web search
-    query_list = [query.search_query for query in results.queries]
-
-    # Search web 
-    search_docs = await tavily_search_async(query_list, tavily_topic, tavily_days)
-
-    # Deduplicate and format sources
-    source_str = deduplicate_and_format_sources(search_docs, max_tokens_per_source=1000, include_raw_content=False)
-
-    # Format system instructions
-    system_instructions_sections = report_planner_instructions.format(topic=topic, report_organization=report_structure, context=source_str)
-
-    # Generate sections 
-    structured_llm = gpt_4o.with_structured_output(Sections)
-    report_sections = structured_llm.invoke([SystemMessage(content=system_instructions_sections)]+[HumanMessage(content="Generate the sections of the report. Your response must include a 'sections' field containing a list of sections. Each section must have: name, description, plan, research, and content fields.")])
-
-    for section in report_sections.sections:
-        #reset value from any llm data
-        section.suggested_urls = []
-        #check if section name is contained in any suggested sections (account for variation in LLM section titles)
-        for suggested_section in suggested_urls_dict.keys():
-            if section.name.lower() in suggested_section:
-                #set suggested list
-                section.suggested_urls = suggested_urls_dict[suggested_section]
-
-    return {"sections": report_sections.sections}
+    return {"sections": pydantic_sections, "rag_namespace": namespace}
 
 def initiate_section_writing(state: ReportState):
     """ This is the "map" step when we kick off web research for some sections of the report """    
         
     # Kick off section writing in parallel via Send() API for any sections that require research
     return [
-        Send("build_section_with_web_research", {"section": s, "exclude_domains": state.get("exclude_domains", None), "include_domains": state.get("include_domains", None)})
+        Send("build_section_with_web_research", {"section": s, "exclude_domains": state.get("exclude_domains", None), "include_domains": state.get("include_domains", None), "rag_namespace": state.get("rag_namespace", "")})
         for s in state["sections"] 
         if s.research
     ]

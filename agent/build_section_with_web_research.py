@@ -7,9 +7,6 @@ import agent.configuration as configuration
 from agent.utils import *
 
 
-# gpt_4o = ChatOpenAI(model="gpt-4o", temperature=0)
-
-
 # ------------------------------------------------------------
 # Graph nodes
 
@@ -48,18 +45,35 @@ async def search_web(state: SectionState, config: RunnableConfig):
     search_queries = state["search_queries"]
     include_domains = state["include_domains"]
     exclude_domains = state["exclude_domains"]
+    rag_indicator = len(state["section"].suggested_urls)
 
     # Get configuration
     configurable = configuration.Configuration.from_runnable_config(config)
     tavily_topic = configurable.tavily_topic
     tavily_days = configurable.tavily_days
 
-    # Web search
+    # queries for web search (or RAG)
     query_list = [query.search_query for query in search_queries]
-    search_docs = await tavily_search_async(query_list, tavily_topic, tavily_days, exclude_domains=exclude_domains, include_domains=include_domains)
 
-    # Deduplicate and format sources
-    source_str = deduplicate_and_format_sources(search_docs, max_tokens_per_source=5000, include_raw_content=True)
+    #web search
+    if not rag_indicator:
+        print('Web search for section ' + state["section"].name)
+        search_docs = await tavily_search_async(query_list, tavily_topic, tavily_days, exclude_domains=exclude_domains, include_domains=include_domains)
+
+        # Deduplicate and format sources
+        source_str = deduplicate_and_format_sources(search_docs, max_tokens_per_source=5000, include_raw_content=True)
+
+    #retrieval search
+    else:
+        print("RAG search for section " + state["section"].name)
+        index_name = configurable.pc_index
+        query = query_list[0]
+
+        retriever = create_retriever(state["rag_namespace"], index_name)
+
+        source_str = retriever.invoke(query)
+        print('retrieved: ' + str(source_str))
+
 
     return {"source_str": source_str}
 

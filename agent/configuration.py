@@ -27,6 +27,8 @@ class Configuration:
     tavily_topic: str = "general"
     tavily_days: str = None
 
+    pc_index: str = 'gateway-partners-firecrawl-test'
+
     llm_selector: str = "gpt-4o-mini"
 
     rag_k: int = 8
