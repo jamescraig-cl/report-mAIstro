@@ -7,18 +7,7 @@ import agent.configuration as configuration
 from agent.utils import *
 from pinecone import Pinecone
 
-from agent.utils import JsonFormatter
-
-# ------------------------------------------------------------
-# Logging
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-handler = logging.StreamHandler()
-formatter = JsonFormatter()
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+from agent.utils import logger
 
 
 # ------------------------------------------------------------

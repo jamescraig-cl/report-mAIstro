@@ -4,18 +4,7 @@ from langgraph.constants import Send
 from langgraph.graph import START, END, StateGraph
 
 from agent.build_section_with_web_research import *
-from agent.utils import JsonFormatter
-
-# ------------------------------------------------------------
-# Logging
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-handler = logging.StreamHandler()
-formatter = JsonFormatter()
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+from agent.utils import logger
 
 # ------------------------------------------------------------
 # Search
