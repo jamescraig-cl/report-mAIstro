@@ -1,10 +1,21 @@
+import time
+
 from langgraph.constants import Send
 from langgraph.graph import START, END, StateGraph
 
-from langchain_pinecone import PineconeVectorStore
-from langchain_openai import OpenAIEmbeddings
-
 from agent.build_section_with_web_research import *
+from agent.utils import JsonFormatter
+
+# ------------------------------------------------------------
+# Logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+handler = logging.StreamHandler()
+formatter = JsonFormatter()
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 # ------------------------------------------------------------
 # Search
@@ -15,12 +26,12 @@ tavily_async_client = AsyncTavilyClient()
 # ------------------------------------------------------------
 # Core graph nodes
 # part 1
-async def generate_report_plan(state: ReportState, config: RunnableConfig):
+async def process_report_plan(state: ReportState, config: RunnableConfig):
     """ Skip generation and pass section JSON as Pydantic Sections to next nodes """
 
     report_sections = state["report_specification"].get("sections")
     namespace = state["report_specification"].get("company").replace(" ", "")
-    print('set namespace ' + namespace)
+    logger.info('set namespace ' + namespace)
     # Get configuration
     configurable = configuration.Configuration.from_runnable_config(config)
 
@@ -36,16 +47,16 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
 
         embedding_model = "text-embedding-3-large"
         embeddings = OpenAIEmbeddings(model=embedding_model)
-        for url in flat_scrape_urls:
-            #scrape each url and return formatted/cleaned chunks
-            docs = await scrape_async(url)
-            #upsert to Pinecone
-            PineconeVectorStore.from_documents(
-                docs,
-                index_name=pc_index,
-                embedding=embeddings,
-                namespace=namespace
-            )
+        docs = await tavily_extract_async(flat_scrape_urls)
+        PineconeVectorStore.from_documents(
+            docs,
+            index_name=pc_index,
+            embedding=embeddings,
+            namespace=namespace
+        )
+        # wait for namespace to register
+        logger.info('waiting for namespace to register')
+        time.sleep(60)
 
     return {"sections": pydantic_sections, "rag_namespace": namespace}
 
@@ -54,7 +65,7 @@ def initiate_section_writing(state: ReportState):
         
     # Kick off section writing in parallel via Send() API for any sections that require research
     return [
-        Send("build_section_with_web_research", {"section": s, "exclude_domains": state.get("exclude_domains", None), "include_domains": state.get("include_domains", None), "rag_namespace": state.get("rag_namespace", "")})
+        Send("build_section_with_web_research", {"section": s, "exclude_domains": state.get("exclude_domains", None), "rag_namespace": state.get("rag_namespace", "")})
         for s in state["sections"] 
         if s.research
     ]
@@ -74,14 +85,25 @@ def gather_completed_sections(state: ReportState):
 
 #intro, conclusion, and other non-research sections
 def initiate_final_section_writing(state: ReportState):
-    """ Write any final sections using the Send API to parallelize the process """    
+    """ Write any final sections using the Send API to parallelize the process
+     OR
+     Skip to compilation step"""
+    #if any sections are 'final sections' with no research requirement
+    if len([section for section in state["sections"] if not section.research]):
+        # Kick off section writing in parallel via Send() API for any sections that do not require research
+        return [
+            Send("write_final_sections", {"section": s, "report_sections_from_research": state["report_sections_from_research"]})
+            for s in state["sections"]
+            if not s.research
+        ]
+    else:
+        return [Send("pass_final_sections", {"section": state["sections"][0], "rag_namespace": state["rag_namespace"]})]
 
-    # Kick off section writing in parallel via Send() API for any sections that do not require research
-    return [
-        Send("write_final_sections", {"section": s, "report_sections_from_research": state["report_sections_from_research"]}) 
-        for s in state["sections"] 
-        if not s.research
-    ]
+def pass_final_sections(state: SectionState, config: RunnableConfig):
+    logger.info('No final sections to write')
+    #do nothing but satisfy state requirement for node
+    rag_namespace = state.get("rag_namespace")
+    return {"rag_namespace": rag_namespace}
 
 #intro, conclusion, and other non-research sections
 def write_final_sections(state: SectionState, config: RunnableConfig):
@@ -96,14 +118,14 @@ def write_final_sections(state: SectionState, config: RunnableConfig):
 
     # llm
     llm_model = configurable.llm_selector
-    gpt_4o = ChatOpenAI(model=llm_model, temperature=0)
+    llm = ChatOpenAI(model=llm_model, temperature=0)
 
     # Format system instructions
     system_instructions = final_section_writer_instructions.format(section_title=section.name,
                                                                    section_topic=section.description,
                                                                    context=completed_report_sections)
     # Generate section
-    section_content = gpt_4o.invoke([SystemMessage(content=system_instructions)] + [
+    section_content = llm.invoke([SystemMessage(content=system_instructions)] + [
         HumanMessage(content="Generate a report section based on the provided sources.")])
 
     # Write content to section
@@ -119,19 +141,18 @@ def compile_final_report(state: ReportState, config: RunnableConfig):
     sections = state["sections"]
     completed_sections = {s.name: s.content for s in state["completed_sections"]}
 
-    # Get configuration
-    configurable = configuration.Configuration.from_runnable_config(config)
+    # # Get configuration
+    # configurable = configuration.Configuration.from_runnable_config(config)
 
-    # llm
-    llm_model = configurable.llm_selector
-    gpt_4o = ChatOpenAI(model=llm_model, temperature=0)
+    # # llm
+    # llm_model = configurable.llm_selector
+    # llm = ChatOpenAI(model=llm_model, temperature=0)
 
-    #att: take completed sections and conform to pydantic model
-    structured_llm = gpt_4o.with_structured_output(FinalSections)
-    system_instructions_json = report_compiler_json_instructions.format(context=completed_sections)
-    structured_prompt = [SystemMessage(content=system_instructions_json)]+[HumanMessage(content="Return a JSON representation of the report, placing each report section into an appropriate JSON object. Using the report as context, categorize the company as a manufacturer, service provide, distributor, or other high-level company type. ")]
-    #type: FinalSections
-    structured_result = structured_llm.invoke(structured_prompt)
+    #take completed sections and conform to pydantic final-report model
+    # structured_llm = llm.with_structured_output(FinalSections)
+    # system_instructions_json = report_compiler_json_instructions.format(context=completed_sections)
+    # structured_prompt = [SystemMessage(content=system_instructions_json)]+[HumanMessage(content="Return a JSON representation of the report, placing each report section into an appropriate JSON object. Using the report as context, categorize the company as a manufacturer, service provide, distributor, or other high-level company type. ")]
+    # structured_result = structured_llm.invoke(structured_prompt)
 
     # Update sections with completed content while maintaining original order
     for section in sections:
@@ -140,7 +161,8 @@ def compile_final_report(state: ReportState, config: RunnableConfig):
     # Compile final report
     all_sections = "\n\n".join([s.content for s in sections])
 
-    return {"final_report": all_sections, "final_report_dict": structured_result}
+    # return {"final_report": all_sections, "final_report_dict": structured_result}
+    return {"final_report": all_sections}
 
 
 
@@ -149,29 +171,29 @@ def compile_final_report(state: ReportState, config: RunnableConfig):
 # Add nodes and edges
 section_builder = StateGraph(SectionState, output=SectionOutputState)
 section_builder.add_node("generate_queries", generate_queries)
-# opt 1 RAG
-# section_builder.add_node("retrieve", retrieve)
-# opt 2 web
-section_builder.add_node("search_web", search_web)
+section_builder.add_node("gather_sources", gather_sources)
 section_builder.add_node("write_section", write_section)
 
 section_builder.add_edge(START, "generate_queries")
-section_builder.add_edge("generate_queries", "search_web")
-section_builder.add_edge("search_web", "write_section")
+section_builder.add_edge("generate_queries", "gather_sources")
+section_builder.add_edge("gather_sources", "write_section")
 section_builder.add_edge("write_section", END)
 
 # Add nodes and edges 
 builder = StateGraph(ReportState, input=ReportStateInput, output=ReportStateOutput, config_schema=configuration.Configuration)
-builder.add_node("generate_report_plan", generate_report_plan)
+builder.add_node("process_report_plan", process_report_plan)
 builder.add_node("build_section_with_web_research", section_builder.compile())
 builder.add_node("gather_completed_sections", gather_completed_sections)
 builder.add_node("write_final_sections", write_final_sections)
+builder.add_node("pass_final_sections", pass_final_sections)
 builder.add_node("compile_final_report", compile_final_report)
-builder.add_edge(START, "generate_report_plan")
-builder.add_conditional_edges("generate_report_plan", initiate_section_writing, ["build_section_with_web_research"])
+
+builder.add_edge(START, "process_report_plan")
+builder.add_conditional_edges("process_report_plan", initiate_section_writing, ["build_section_with_web_research"])
 builder.add_edge("build_section_with_web_research", "gather_completed_sections")
-builder.add_conditional_edges("gather_completed_sections", initiate_final_section_writing, ["write_final_sections"])
+builder.add_conditional_edges("gather_completed_sections", initiate_final_section_writing, ["write_final_sections", "pass_final_sections"])
 builder.add_edge("write_final_sections", "compile_final_report")
+builder.add_edge("pass_final_sections", "compile_final_report")
 builder.add_edge("compile_final_report", END)
 
 graph = builder.compile()

@@ -13,3 +13,4 @@ typing_extensions~=4.12.2
 pydantic~=2.10.3
 langchain-text-splitters~=0.3.2
 firecrawl-py
+pinecone-client~=5.0.1

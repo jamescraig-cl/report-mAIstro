@@ -1,20 +1,43 @@
+import json
 
-import asyncio
-import operator
-
-from langchain_core.tools import create_retriever_tool
-from langchain_openai import OpenAIEmbeddings
-from langchain_pinecone import PineconeVectorStore
 from typing_extensions import TypedDict
 from typing import  Annotated, List
 from pydantic import BaseModel, Field
 from langsmith import traceable
-
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders.firecrawl import FireCrawlLoader
-
 from enum import Enum
+import asyncio
+import operator
+
+from langchain_core.documents import Document
+from langchain_openai import OpenAIEmbeddings
+from langchain_pinecone import PineconeVectorStore
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from tavily import TavilyClient, AsyncTavilyClient
+
+import logging
+
+# ------------------------------------------------------------
+# Logging
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        log_record = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "message": record.getMessage(),
+        }
+        if hasattr(record, 'extra'):
+            log_record.update(record.extra)
+        return json.dumps(log_record)
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+handler = logging.StreamHandler()
+formatter = JsonFormatter()
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 # ------------------------------------------------------------
 # Search
@@ -41,8 +64,6 @@ class Section(BaseModel):
     suggested_urls: list[str] = Field(
         description="List of user-supplied URLs to use for web research"
     )
-
-
 
 class Sections(BaseModel):
     sections: List[Section] = Field(
@@ -78,7 +99,6 @@ class CategoryEnum(str, Enum):
     media = 'media'
 
 class FinalSection(BaseModel):
-    # name: str = Field(description="The name of the section")
     name: SectionEnum
     content: str = Field(description="the content of the section")
 
@@ -90,15 +110,11 @@ class FinalSections(BaseModel):
 
 
 
-
 # ------------------------------------------------------------
 # State
 
 class ReportStateInput(TypedDict):
-    topic: str # Report topic
-    suggested_urls_dict: dict
     scrape_indicator: bool
-    include_domains: list[str]
     exclude_domains: list[str]
     report_specification: dict
 
@@ -108,18 +124,14 @@ class ReportStateOutput(TypedDict):
     final_report_dict: FinalSections
 
 class ReportState(TypedDict):
-    topic: str # Report topic
     sections: list[Section] # List of report sections
     completed_sections: Annotated[list, operator.add] # Send() API key
     report_sections_from_research: str # String of any completed sections from research to write final sections
     final_report: str # Final report
-    suggested_urls_dict: dict
     scrape_indicator: bool
     rag_namespace: str
-    include_domains: list[str]
     exclude_domains: list[str]
     report_specification: dict
-
 
 class SectionState(TypedDict):
     section: Section # Report section
@@ -246,7 +258,12 @@ Guidelines for writing:
 - Focus on your single most important point
 
 4. Use this source material to help write the section:
+
 {context}
+
+and use any urls below as additional sources:
+
+{section_sources}
 
 5. Quality Checks:
 
@@ -306,11 +323,14 @@ For Conclusion/Summary:
 - Markdown format
 - Do not include word count or any preamble in your response"""
 
+#Instructions to translate a markdown report into JSON
+#In conjunction with structured output, forces output to conform to specific pattern
 report_compiler_json_instructions = """
 Translate the following report into JSON, placing each section in the appropriate JSON object
 
 {context}
 """
+
 # ------------------------------------------------------------
 # Utility functions
 
@@ -360,7 +380,7 @@ def deduplicate_and_format_sources(search_response, max_tokens_per_source, inclu
             raw_content = source.get('raw_content', '')
             if raw_content is None:
                 raw_content = ''
-                print(f"Warning: No raw_content found for source {source['url']}")
+                logger.info(f"Warning: No raw_content found for source {source['url']}")
             if len(raw_content) > char_limit:
                 raw_content = raw_content[:char_limit] + "... [truncated]"
             formatted_text += f"Full source content limited to {max_tokens_per_source} tokens: {raw_content}\n\n"
@@ -431,11 +451,11 @@ async def tavily_search_async(search_queries, tavily_topic, tavily_days, **kwarg
 
     exclude_domains = kwargs.get('exclude_domains', None)
     if exclude_domains:
-        print('exclude ' + str(exclude_domains))
+        logger.info('exclude ' + str(exclude_domains))
 
     include_domains = kwargs.get('include_domains', None)
     if include_domains:
-        print('include ' + str(include_domains))
+        logger.info('include ' + str(include_domains))
 
     for query in search_queries:
         if tavily_topic == "news":
@@ -468,45 +488,57 @@ async def tavily_search_async(search_queries, tavily_topic, tavily_days, **kwarg
     return search_docs
 
 @traceable
-async def scrape_async(url):
+async def tavily_extract_async(urls):
+    """ Search a single web page using the Tavily API.
 
-    loader = FireCrawlLoader(
-        url=url,
-        mode="scrape",
-    )
-    documents = loader.load()
+        Args:
+            url (str): The web page to extract
+
+        Returns:
+            docs: output of text-splitter that breaks up long pages"""
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1024,
         chunk_overlap=128,
         length_function=len,
         is_separator_regex=False,
     )
-    filtered_documents = filter(lambda raw_document: "error" not in raw_document.metadata.keys(), documents)
 
-    docs = text_splitter.split_documents(filtered_documents)
+    response_dict = tavily_client.extract(urls=urls)
 
-    for document in docs:
-        header_string = "Title: " + document.metadata.get("title", '') + " Description: " + document.metadata.get(
-            "description", '')
-        document.page_content = header_string + ' ' + document.page_content
+    documents = []
+    #map tavily output to Document array for splitting
+    for source in response_dict.get("results", []):
+        source_url = source.get("url")
+        source_document = Document(
+            page_content=source_url + ': ' + source.get("raw_content"),
+            metadata={"source": source_url}
+        )
+        documents.append(source_document)
+
+    docs = text_splitter.split_documents(documents)
 
     return docs
 
 
-def create_retriever(namespace, index_name):
+def create_retriever(namespace, index_name, retriever_k):
+    """
+    Prepare a Pinecone - LangChain retriever
 
+    Args:
+        namespace (str): The company name
+        index_name (str): The Pinecone index (deployment-level)
+        retriever_k (int): The number of docs to retrieve
+
+    Returns:
+        retriever: A langchain retriever for the specified resources
+    """
     embedding_model = "text-embedding-3-large"
     embeddings = OpenAIEmbeddings(model=embedding_model)
 
     #prepare retriever tool and select by namespace
     vectorsearch = PineconeVectorStore(index_name=index_name, embedding=embeddings, namespace=namespace)
-    print("   ---RETRIEVER FOR '" + namespace + "'---")
+    logger.info("   ---RETRIEVER FOR '" + namespace + "'---")
 
-    retriever = vectorsearch.as_retriever(search_kwargs={"k": 2, "namespace": namespace})
+    retriever = vectorsearch.as_retriever(search_kwargs={"k": retriever_k, "namespace": namespace})
 
-    retriever_tool = create_retriever_tool(
-        retriever,
-        "search_company_website",
-        "Searches and returns content from within the company website.",
-    )
     return retriever

@@ -31,8 +31,11 @@ class Configuration:
 
     llm_selector: str = "gpt-4o-mini"
 
-    rag_k: int = 8
+    #settings for retrieval: k (initial # of docs), n (# of reranked docs)
+    rerank_n: int = 5
+    rag_k: int = 20
     rag_embedder: str = "text-embedding-3-large"
+    rag_threshold: float = 0.75
 
     @classmethod
     def from_runnable_config(
